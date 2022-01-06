@@ -2,6 +2,9 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
+
+using Interlocked = System.Threading.Interlocked;
 
 namespace TS404.Entities;
 
