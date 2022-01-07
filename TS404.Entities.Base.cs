@@ -88,6 +88,28 @@ public class Entity : IEntity, IEquatable<Entity>
 	/// </summary>
 	public ComponentCollection Components => m_Components ??= new(this);
 
+	/// <summary>
+	///		Returns <see langword="true"/> if the component is allowed to be added, otherwise
+	///		returns <see langword="false"/>.
+	/// </summary>
+	protected virtual bool ComponentAddValidation(Component component) => true;
+
+	/// <summary>
+	///		Returns <see langword="true"/> if the component is allowed to be removed, otherwise
+	///		returns <see langword="false"/>.
+	/// </summary>
+	protected virtual bool ComponentRemoveValidation(Component component) => true;
+
+	/// <summary>
+	///		Called after <paramref name="component"/> is added to <see cref="Components"/>.
+	/// </summary>
+	protected virtual void OnComponentAdded(Component component) { }
+
+	/// <summary>
+	///		Called after <paramref name="component"/> is removed from <see cref="Components"/>.
+	/// </summary>
+	protected virtual void OnComponentRemoved(Component component) { }
+
 	/// <inheritdoc cref="ComponentCollection.GetByType{T}"/>
 	public T GetComponent<T>() => m_Components is null ? default! : m_Components.GetByType<T>()!;
 
@@ -110,9 +132,9 @@ public class Entity : IEntity, IEquatable<Entity>
 	/// </summary>
 	public sealed class ComponentCollection : ICollection<Component>
 	{
-		private List<Component?> m_List = new();
-
 		private readonly Entity m_Entity;
+		private List<Component?> m_List = new();
+		private int m_Version;
 
 		/// <summary>
 		///		Number of <see cref="Component"/> contained.
@@ -136,7 +158,7 @@ public class Entity : IEntity, IEquatable<Entity>
 		///		Returns <see langword="true"/> if a <see cref="Component"/> was found that
 		///		matches <typeparamref name="T"/>, otherwise returns <see langword="false"/>.
 		/// </summary>
-		public bool TryGetByType<T>([MaybeNullWhen(false)] out T result)
+		public bool TryGetByType<T>([NotNullWhen(true)] out T? result)
 		{
 			if (TTypeInfo<T>.CanBeComponent)
 			{
@@ -172,7 +194,7 @@ public class Entity : IEntity, IEquatable<Entity>
 		///		Returns <see langword="true"/> if <paramref name="component"/> is contained, otherwise
 		///		returns <see langword="false"/>.
 		/// </summary>
-		public bool Contains([NotNullWhen(true)] Component? component) => component is not null && m_List.Contains(component);
+		public bool Contains([NotNullWhen(true)] Component? component) => component is not null && component.Entity == m_Entity;
 
 		bool ICollection<Component>.Contains(Component component) => Contains(component);
 
@@ -182,8 +204,29 @@ public class Entity : IEntity, IEquatable<Entity>
 		/// </summary>
 		public bool Remove([NotNullWhen(true)] Component? component)
 		{
-			bool removed = component is not null && component.Entity == m_Entity && m_List.Remove(component);
-			if (removed) ((IComponent)component!).Entity = null;
+			if (component is null || component.Entity != m_Entity || !m_Entity.ComponentRemoveValidation(component))
+				return false;
+
+			bool removed = false;
+			lock (m_List)
+			{
+				if (component.Entity == m_Entity && m_Entity.ComponentRemoveValidation(component))
+				{
+					int index = m_List.IndexOf(component);
+					int lastIndex = Count - 1;
+					
+					if (index != lastIndex) m_List[index] = m_List[lastIndex];
+					m_List.RemoveAt(lastIndex);
+					unchecked { m_Version++; }
+
+					((IComponent)component).Entity = null;
+					
+					removed = true;
+				}
+			}
+
+			if (removed) m_Entity.OnComponentRemoved(component);
+
 			return removed;
 		}
 
@@ -197,10 +240,26 @@ public class Entity : IEntity, IEquatable<Entity>
 		/// </summary>
 		public bool Add(Component component)
 		{
-			if (component.Entity is not null || m_List.Contains(component)) return false;
-			m_List.Add(component);
-			((IComponent)component).Entity = m_Entity;
-			return true;
+			if (component.Entity is not null || !m_Entity.ComponentAddValidation(component))
+				return false;
+
+			bool added = false;
+			lock (m_List)
+			{
+				if (component.Entity is null && m_Entity.ComponentAddValidation(component))
+				{
+					m_List.Add(component);
+					unchecked { m_Version++; }
+
+					((IComponent)component).Entity = m_Entity;
+					
+					added = true;
+				}
+			}
+
+			if (added) m_Entity.OnComponentAdded(component);
+			
+			return added;
 		}
 
 		void ICollection<Component>.Add(Component component) { if (!Add(component)) throw new Exception("Component not added."); }
@@ -210,8 +269,28 @@ public class Entity : IEntity, IEquatable<Entity>
 		/// </summary>
 		public void Clear()
 		{
-			static void SetEntityNull(Component? component) => ((IComponent)component!).Entity = null;
-			Interlocked.Exchange(ref m_List, new()).ForEach(SetEntityNull);
+			List<Component?> removed;
+
+			lock (this) // Entity.ComponentRemoveValidation might throw...
+			{
+				removed = m_List;
+				m_List = new();
+				for (int i = 0; i < removed.Count; i++)
+				{
+					if (!m_Entity.ComponentRemoveValidation(removed[i]!))
+					{
+						m_List.Add(removed[i]);
+						removed[i] = null;
+					}
+				}
+			}
+
+			foreach(var component in removed)
+			{
+				if (component is null) continue;
+				if (component.Entity == m_Entity) ((IComponent)component).Entity = null;
+				m_Entity.OnComponentRemoved(component);
+			}
 		}
 
 		/// <summary>
@@ -219,11 +298,69 @@ public class Entity : IEntity, IEquatable<Entity>
 		/// </summary>
 		public Component?[] ToArray() => m_List.ToArray();
 
-		public void CopyTo(Component?[] array, int arrayIndex = 0) => m_List.CopyTo(array, arrayIndex);
+		public void CopyTo(Component?[] array, int arrayIndex = 0)
+		{
+			const string ERR_NotEnoughSpace = "Array cannot hold all items.";
+			if (arrayIndex + Count >= array.Length) throw new ArgumentException(ERR_NotEnoughSpace);
+
+			Monitor.Enter(m_List);
+			if (arrayIndex + Count >= array.Length)
+			{
+				Monitor.Exit(m_List);
+				throw new ArgumentException(ERR_NotEnoughSpace);
+			}
+			m_List.CopyTo(array, arrayIndex);
+			Monitor.Exit(m_List);
+		}
 
 		public IEnumerator<Component> GetEnumerator() { foreach (var component in m_List) yield return component!; }
 
 		IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+		public struct Enumerator : IEnumerator<Component>
+		{
+			private const string ERR_BadVersion = "Collection has changed.";
+			private readonly ComponentCollection m_Collection;
+			private readonly int m_Version;
+			private int m_Index = 0;
+			private Component? m_Current = null;
+
+			public Component Current => m_Current ?? throw new InvalidOperationException();
+			object IEnumerator.Current => Current;
+
+			internal Enumerator(ComponentCollection collection)
+			{
+				m_Collection = collection;
+				m_Version = collection.m_Version;
+			}
+
+			void IDisposable.Dispose() { }
+
+			public void Reset()
+			{
+				if (m_Version != m_Collection.m_Version) throw new InvalidOperationException(ERR_BadVersion);
+				m_Index = 0;
+				m_Current = null;
+			}
+
+			public bool MoveNext()
+			{
+				if (m_Version != m_Collection.m_Version)
+				{
+					throw new InvalidOperationException(ERR_BadVersion);
+				}
+				else if (m_Index < m_Collection.Count)
+				{
+					m_Current = m_Collection.m_List[m_Index++];
+					return true;
+				}
+				else
+				{
+					m_Current = null;
+					return false;
+				}
+			}
+		}
 	}
 
 	#endregion Components
@@ -370,7 +507,7 @@ public abstract class EntityCollective : ICollection<Entity>
 
 		Serial serial = entity.Serial;
 		if (serial.IsZero) serial = NewSerial();
-		
+
 		if (!CoreAdd(new(serial, entity)))
 			return false;
 
