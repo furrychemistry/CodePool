@@ -3,36 +3,11 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-
-using Interlocked = System.Threading.Interlocked;
+using System.Threading;
 
 namespace TS404.Entities;
 
 #nullable enable
-
-/// Notes?
-/// 
-/// Entity-Component-System where Entity is <see cref="Entity"/>, Component is <see cref="Component"/>,
-/// and System is <see cref="EntityCollective"/>.
-/// 
-/// System contains multiple entities (keyed by Serial) with an underlying
-/// <see cref="ConcurrentDictionary{TKey, TValue}"/> for storage.
-/// 
-/// Entities may contain multiple components with an underlying <see cref="List{T}"/> for storage,
-/// and the same instance is never added twice. Entity may also be inherited and never has to make
-/// use of components. Never has to be added to a system.
-/// 
-/// Components can be attached to only one entity.
-/// 
-/// <see cref="IEntity"/> and <see cref="IComponent"/> are used to partition internal operations
-/// (coupling, notifications) from public ones to prevent accidental 'features'.
-/// 
-/// Entity Coupling
-///		Entity Collection [Table] with Entity records [Key = Serial]
-///			<see cref="IEntity.Container"/>, <see cref="IEntity.Serial"/>
-///		Entity [Table] with unordered Component records [Key = instance]
-///			<see cref="Entity.Components"/>, <see cref="IComponent.Entity"/>
-/// 
 
 /// <summary>
 ///		May contain multiple <see cref="Component"/> to augment functionality and/or data.
@@ -338,9 +313,8 @@ public class Component : IComponent, IEquatable<Component>
 ///		System in an Entity-Component-System, where Entity is <see cref="Entity"/> and Component is
 ///		<see cref="Component"/>.
 /// </summary>
-public sealed class EntityCollective : ICollection<Entity>
+public abstract class EntityCollective : ICollection<Entity>
 {
-	private readonly ConcurrentDictionary<Serial, Entity> m_Dictionary = new();
 	private Serial m_LastSerial;
 	private int m_Count;
 
@@ -355,6 +329,186 @@ public sealed class EntityCollective : ICollection<Entity>
 	public EntityCollective() { }
 
 	/// <summary>
+	///		Returns an unused <see cref="Serial"/>.
+	/// </summary>
+	public virtual Serial NewSerial()
+	{
+Serial serial;
+		while ((serial = ++m_LastSerial).IsZero || m_Dictionary.ContainsKey(serial)) ;
+		return serial;
+	}
+
+	#region Add
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> is allowed to proceed with being added,
+	///		otherwise returns <see langword="false"/> and prevents adding to the collection.
+	/// </summary>
+	protected virtual bool CoreAddValidation(Entity entity) => true;
+
+	/// <summary>
+	///		Adds <paramref name="pair"/> to the underlying collection. Should do no other actions.
+	/// </summary>
+	protected abstract bool CoreAdd(KeyValuePair<Serial, Entity> pair);
+
+	/// <summary>
+	///		Called when <paramref name="entity"/> is added to the collection.
+	/// </summary>
+	protected virtual void OnEntityAdded(Entity entity) { }
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> was added, otherwise returns
+	///		<see langword="false"/>.
+	///	<para/>
+	///		If <paramref name="entity"/> has a <see cref="Entity.Serial"/> of zero, a new
+	///		<see cref="Serial"/> will be assigned if added to the collection.
+	/// </summary>
+	public bool Add(Entity entity)
+	{
+		if (Contains(entity) || Contains(entity.Serial) || !CoreAddValidation(entity))
+			return false;
+
+		Serial serial = entity.Serial;
+		if (serial.IsZero) serial = NewSerial();
+		
+		if (!CoreAdd(new(serial, entity)))
+			return false;
+
+		Interlocked.Increment(ref m_Count);
+
+		IEntity cast = entity;
+		cast.Container = this;
+		cast.Serial = serial;
+
+		// Notify.
+		OnEntityAdded(entity);
+
+		return true;
+	}
+
+	#endregion Add
+
+	#region ChangeSerial
+
+	/// <summary>
+	///		Called when <paramref name="entity"/> changed it's <see cref="Entity.Serial"/> from
+	///		<paramref name="oldSerial"/> to <paramref name="newSerial"/>.
+	/// </summary>
+	protected virtual void OnEntitySerialChanged(Entity entity, Serial oldSerial, Serial newSerial) { }
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> has it's <see cref="Entity.Serial"/>
+	///		successfully changed, otherwise returns <see langword="false"/> and no change occurs.
+	/// </summary>
+	public bool TryChangeSerial(Entity entity, Serial value)
+	{
+		Serial oldSerial = entity.Serial;
+		if (value.IsZero || value == oldSerial || !Contains(entity) || !CoreAdd(new(value, entity)))
+			return false;
+
+		// Remove entity using it's old serial.
+		if (!CoreRemove(new(oldSerial, entity)))
+		{
+			// Remove failed, what happened? Let's at least tell what steps we were doing. Debug is needed if we got here.
+			const string baseMessage = "Entity added using new serial, but couldn't be removed using it's old serial.";
+			const string notRemovedMessage = baseMessage + ".. then entity couldn't be removed using the new serial.";
+			throw new ApplicationException(CoreRemove(new(value, entity)) ? baseMessage : notRemovedMessage);
+		}
+
+		// Assign new serial.
+		((IEntity)entity).Serial = value;
+
+		// Notify.
+		OnEntitySerialChanged(entity, oldSerial, value);
+
+		return true;
+	}
+
+	#endregion ChangeSerial
+
+	#region Remove
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> is allowed to be removed,
+	///		otherwise returns <see langword="false"/> and prevents removing from the collection.
+	///	<para/>
+	///		<see cref="Remove(Entity?, bool)"/> may bypass this.
+	/// </summary>
+	protected virtual bool CoreRemoveValidation(Entity entity) => true;
+
+	/// <summary>
+	///		Removes <paramref name="pair"/> from the underlying collection. Should do no other actions.
+	/// </summary>
+	protected abstract bool CoreRemove(KeyValuePair<Serial, Entity> pair);
+
+	/// <summary>
+	///		Called when <paramref name="entity"/> is removed from the collection.
+	/// </summary>
+	protected virtual void OnEntityRemoved(Entity entity) { }
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> was removed, otherwise returns
+	///		<see langword="false"/>.
+	/// </summary>
+	public bool Remove(Entity? entity) => Remove(entity, force: false);
+
+	/// <summary>
+	///		Returns <see langword="true"/> is the associated <see cref="Entity"/> was removed,
+	///		otherwise returns <see langword="false"/>.
+	/// </summary>
+	public bool Remove(Serial serial) => Remove(GetEntity(serial));
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> was removed, otherwise returns
+	///		<see langword="false"/>. Optionally, allows bypassing <see cref="CoreRemoveValidation(Entity)"/>.
+	/// </summary>
+	protected bool Remove(Entity? entity, bool force)
+	{
+		if (entity is null || !Contains(entity) || (force && !CoreRemoveValidation(entity)) || !CoreRemove(new(entity.Serial, entity)))
+			return false;
+
+		Interlocked.Decrement(ref m_Count);
+		((IEntity)entity).Container = null;
+
+		// Notify.
+		OnEntityRemoved(entity);
+
+		return true;
+	}
+
+	#endregion Remove
+
+	#region Contains
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="serial"/> is contained by the underlying collection,
+	///		otherwise returns <see langword="false"/>. Should do no other actions.
+	/// </summary>
+	protected abstract bool CoreContains(Serial serial);
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> was found, otherwise returns
+	///		<see langword="false"/>.
+	/// </summary>
+	public bool Contains(Entity? entity) => entity is not null && ReferenceEquals(entity.Container, this);
+
+	/// <summary>
+	///		Returns <see langword="true"/> if the <paramref name="serial"/> was found, otherwise returns
+	///		<see langword="false"/>.
+	/// </summary>
+	public bool Contains(Serial serial) => CoreContains(serial);
+
+	#endregion Contains
+
+	#region GetEntity
+
+	/// <summary>
+	///		Returns <see langword="true"/> if <paramref name="entity"/> is not null, otherwise returns
+	///		<see langword="false"/>. Should do no other actions.
+	/// </summary>
+	protected abstract bool CoreTryGetEntity(Serial serial, [NotNullWhen(true)] out Entity? entity);
+
+	/// <summary>
 	///		Returns <see langword="null"/> if <paramref name="serial"/> was not found, otherwise returns the
 	///		<see cref="Entity"/>.
 	/// </summary>
@@ -364,135 +518,36 @@ public sealed class EntityCollective : ICollection<Entity>
 	///		Returns <see langword="true"/> if <paramref name="entity"/> is not <see langword="null"/>,
 	///		otherwise returns <see langword="false"/>.
 	/// </summary>
-	public bool TryGetEntity(Serial serial, [MaybeNullWhen(false)] out Entity entity)
-		=> m_Dictionary.TryGetValue(serial, out entity);
+	public bool TryGetEntity(Serial serial, [NotNullWhen(true)] out Entity? entity) => CoreTryGetEntity(serial, out entity);
+
+	#endregion GetEntity
+
+	#region GetEnumerator
 
 	/// <summary>
-	///		Returns <see langword="true"/> if <paramref name="entity"/> was found, otherwise returns
-	///		<see langword="false"/>.
+	///		Returns an enumerator that iterates through this collecion.
 	/// </summary>
-	public bool Contains(Entity? entity)
-		=> entity is not null && ReferenceEquals(entity.Container, this);
+	public IEnumerator<Entity> GetEnumerator() => CoreGetEnumerator();
 
-	/// <summary>
-	///		Returns <see langword="true"/> if the <paramref name="serial"/> was found, otherwise returns
-	///		<see langword="false"/>.
-	/// </summary>
-	public bool Contains(Serial serial) => !serial.IsZero && m_Dictionary.ContainsKey(serial);
+	/// <inheritdoc cref="GetEnumerator"/>
+	protected abstract IEnumerator<Entity> CoreGetEnumerator();
 
-	/// <summary>
-	///		Returns an unused <see cref="Serial"/>.
-	/// </summary>
-	public Serial NewSerial()
-	{
-		Serial serial;
-		while ((serial = ++m_LastSerial).IsZero || m_Dictionary.ContainsKey(serial)) ;
-		return serial;
-	}
+	IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-	/// <summary>
-	///		Returns a non-zero <see cref="Serial"/>. If <paramref name="entity"/> has a <see cref="Entity.Serial"/>
-	///		of zero, <see cref="NewSerial"/> is assigned and that value is returned.
-	/// </summary>
-	private Serial GetAssignSerial(Entity entity)
-	{
-		if (entity.Serial.IsZero) ((IEntity)entity).Serial = NewSerial();
-		return entity.Serial;
-	}
+	#endregion GetEnumerator
 
-	/// <summary>
-	///		Returns <see langword="true"/> if <paramref name="entity"/> was added, otherwise returns
-	///		<see langword="false"/>.
-	///	<para/>
-	///		If <paramref name="entity"/> has a <see cref="Entity.Serial"/> of zero, a new
-	///		<see cref="Serial"/> will be assigned even if returning <see langword="false"/>.
-	/// </summary>
-	public bool Add(Entity entity)
-	{
-		if (Contains(entity) || Contains(entity.Serial) || !m_Dictionary.TryAdd(GetAssignSerial(entity), entity))
-			return false;
+	// Not supported: Clear(), CopyTo(Entity[] array, int arrayIndex)
+	#region ICollection<Entity>
 
-		Interlocked.Increment(ref m_Count);
-		((IEntity)entity).Container = this;
-
-		return true;
-	}
-
-	/// <summary>
-	///		Returns <see langword="true"/> if <paramref name="entity"/> has it's <see cref="Entity.Serial"/>
-	///		successfully changed, otherwise returns <see langword="false"/> and no change occured.
-	/// </summary>
-	public bool TryChangeSerial(Entity entity, Serial value)
-	{
-		if (value.IsZero || value == entity.Serial || !Contains(entity) || !m_Dictionary.TryAdd(value, entity))
-			return false;
-
-		// Remove entity using it's old serial.
-		if (!m_Dictionary.TryRemove(new KeyValuePair<Serial, Entity>(entity.Serial, entity)))
-		{
-			// Remove failed, what happened? Let's at least tell what steps we were doing. Debug is needed
-			// if we got here.
-
-			if (!m_Dictionary.TryRemove(value, out var other))
-				throw new ApplicationException("Entity added using new serial, but couldn't be removed " +
-					"using it's old serial... then entity couldn't be removed using the new serial.");
-
-			else if (entity != other)
-				throw new ApplicationException("Entity added using new serial, but couldn't be removed " +
-					"using it's old serial... then entity removed using the old serial wasn't the original entity.");
-
-			else
-				throw new ApplicationException("Entity added using new serial, but couldn't be removed " +
-					"using it's old serial.");
-		}
-
-		// Assign new serial.
-		((IEntity)entity).Serial = value;
-
-		return true;
-	}
-
-	/// <summary>
-	///		Returns <see langword="true"/> if <paramref name="entity"/> was removed, otherwise returns
-	///		<see langword="false"/>.
-	/// </summary>
-	public bool Remove(Entity? entity)
-	{
-		if (entity is null || !Contains(entity) || !m_Dictionary.TryRemove(new(entity.Serial, entity)))
-			return false;
-
-		Interlocked.Decrement(ref m_Count);
-		((IEntity)entity).Container = null;
-
-		return true;
-	}
-
-	/// <summary>
-	///		Returns <see langword="true"/> is the associated <see cref="Entity"/> was removed,
-	///		otherwise returns <see langword="false"/>.
-	/// </summary>
-	public bool Remove(Serial serial) => Remove(GetEntity(serial));
-
-	/// <summary>
-	///		Returns an enumerator from a <see cref="ConcurrentDictionary{TKey, TValue}"/>. See the .net core
-	///		documentation for more information.
-	/// </summary>
-	public IEnumerator<Entity> GetEnumerator() => m_Dictionary.Values.GetEnumerator();
-
-	// Some things are good to know.
 	void ICollection<Entity>.Clear() => throw new NotSupportedException();
 
-	#region ICollection<Entity>
+	void ICollection<Entity>.CopyTo(Entity[] array, int arrayIndex) => throw new NotSupportedException();
 
 	bool ICollection<Entity>.IsReadOnly => false;
 
 	void ICollection<Entity>.Add(Entity entity) { if (!Add(entity)) throw new Exception("Entity not added."); }
 
 	bool ICollection<Entity>.Remove(Entity entity) => Remove(entity);
-
-	void ICollection<Entity>.CopyTo(Entity[] array, int arrayIndex) => m_Dictionary.Values.CopyTo(array, arrayIndex);
-
-	IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
 	#endregion ICollection<Entity>
 }
