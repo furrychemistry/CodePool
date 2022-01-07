@@ -29,15 +29,15 @@ internal interface IEntity
 }
 
 /// <summary>
-///		Attaches to one <see cref="Entity"/>, augmenting it with functionality and/or data.
+///		Attaches to one <see cref="TS404.Entities.Entity"/>, augmenting it with functionality and/or data.
 /// <para/>
-///		Component in an Entity-Component-System, where Entity is <see cref="Entity"/>
+///		Component in an Entity-Component-System, where Entity is <see cref="TS404.Entities.Entity"/>
 ///		and System is <see cref="EntityCollective"/>.
 /// </summary>
 internal interface IComponent
 {
 	/// <summary>
-	///		<see cref="EntityV1.Entity"/> this <see cref="Component"/> is attached to.
+	///		<see cref="TS404.Entities.Entity"/> this <see cref="Component"/> is attached to.
 	/// </summary>
 	Entity? Entity { get; set; }
 }
@@ -128,7 +128,7 @@ public class Entity : IEntity, IEquatable<Entity>
 	public T GetOrCreateComponent<T>() where T : Component, new() => Components.GetOrCreate<T>();
 
 	/// <summary>
-	///		Collection of <see cref="Component"/> as attached to a specific <see cref="Entity"/>.
+	///		Collection of <see cref="Component"/> as attached to a specific <see cref="TS404.Entities.Entity"/>.
 	/// </summary>
 	public sealed class ComponentCollection : ICollection<Component>
 	{
