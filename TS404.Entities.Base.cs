@@ -333,8 +333,8 @@ public abstract class EntityCollective : ICollection<Entity>
 	/// </summary>
 	public virtual Serial NewSerial()
 	{
-Serial serial;
-		while ((serial = ++m_LastSerial).IsZero || m_Dictionary.ContainsKey(serial)) ;
+		Serial serial;
+		while ((serial = ++m_LastSerial).IsZero || Contains(serial)) ;
 		return serial;
 	}
 
