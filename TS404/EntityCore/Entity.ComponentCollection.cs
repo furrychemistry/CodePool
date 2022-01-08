@@ -11,10 +11,19 @@ namespace TS404;
 /// <inheritdoc cref="IEntity"/>
 public partial class Entity : IEntity, IEquatable<Entity>
 {
+	private interface IComponentCollection
+	{
+		/// <summary>
+		///		Returns <see langword="true"/> if <paramref name="component"/> was removed, otherwise returns
+		///		<see langword="false"/>. Optionally, allows bypassing <see cref="Entity.ComponentRemoveValidation(Component)"/>.
+		/// </summary>
+		bool Remove(Component? component, bool force);
+	}
+
 	/// <summary>
 	///		Collection of <see cref="Component"/> as attached to a specific <see cref="TS404.Entity"/>.
 	/// </summary>
-	public sealed class ComponentCollection : ICollection<Component>
+	public sealed class ComponentCollection : IComponentCollection, ICollection<Component>
 	{
 		/// <summary>
 		///		Returns <see langword="true"/> when <paramref name="component"/> changed it's <see cref="Component.Entity"/> to
@@ -107,19 +116,18 @@ public partial class Entity : IEntity, IEquatable<Entity>
 
 		bool ICollection<Component>.Contains(Component component) => Contains(component);
 
-		/// <summary>
-		///		Returns <see langword="true"/> if <paramref name="component"/> was removed, otherwise returns
-		///		<see langword="false"/>.
-		/// </summary>
-		public bool Remove([NotNullWhen(true)] Component? component)
+		bool IComponentCollection.Remove(Component? component, bool force) => Remove(component, force);
+
+		/// <inheritdoc cref="IComponentCollection.Remove(Component?, bool)"/>
+		private bool Remove(Component? component, bool force)
 		{
-			if (component is null || component.Entity != m_Entity || !m_Entity.ComponentRemoveValidation(component))
+			if (component is null || component.Entity != m_Entity || (!force && !m_Entity.ComponentRemoveValidation(component)))
 				return false;
 
 			bool removed = false;
 			lock (m_List)
 			{
-				if (component.Entity == m_Entity && m_Entity.ComponentRemoveValidation(component))
+				if (component.Entity == m_Entity && (force || m_Entity.ComponentRemoveValidation(component)))
 				{
 					int index = m_List.IndexOf(component);
 					int lastIndex = Count - 1;
@@ -138,6 +146,12 @@ public partial class Entity : IEntity, IEquatable<Entity>
 
 			return removed;
 		}
+
+		/// <summary>
+		///		Returns <see langword="true"/> if <paramref name="component"/> was removed, otherwise returns
+		///		<see langword="false"/>.
+		/// </summary>
+		public bool Remove([NotNullWhen(true)] Component? component) => Remove(component, false);
 
 		bool ICollection<Component>.Remove(Component component) => Remove(component);
 

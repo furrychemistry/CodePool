@@ -57,13 +57,15 @@ public partial class Entity : IEntity, IEquatable<Entity>
 
 	/// <summary>
 	///		Returns <see langword="true"/> if the component is allowed to be added, otherwise
-	///		returns <see langword="false"/>.
+	///		returns <see langword="false"/>. Called by <see cref="ComponentCollection.Add(Component)"/>
+	///		before adding to the collection.
 	/// </summary>
 	protected virtual bool ComponentAddValidation(Component component) => true;
 
 	/// <summary>
 	///		Returns <see langword="true"/> if the component is allowed to be removed, otherwise
-	///		returns <see langword="false"/>.
+	///		returns <see langword="false"/>. Called by <see cref="ComponentCollection.Remove(Component?, bool)"/>
+	///		before removing from the collection.
 	/// </summary>
 	protected virtual bool ComponentRemoveValidation(Component component) => true;
 
@@ -93,6 +95,10 @@ public partial class Entity : IEntity, IEquatable<Entity>
 
 	/// <inheritdoc cref="ComponentCollection.GetOrCreate{T}"/>
 	public T GetOrCreateComponent<T>() where T : Component, new() => Components.GetOrCreate<T>();
+
+	/// <inheritdoc cref="IComponentCollection.Remove(Component?, bool)"/>
+	protected bool RemoveComponent(Component? component, bool force)
+		=> (m_Components as IComponentCollection)?.Remove(component, force) ?? false;
 
 	#endregion Components
 
