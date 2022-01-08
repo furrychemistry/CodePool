@@ -21,6 +21,11 @@ public class Component : IComponent, IEquatable<Component>
 
 	Entity? IComponent.Entity { get => m_Entity; set => m_Entity = value; }
 
+	/// <inheritdoc cref="IComponent.EntityChanged(Entity)"/>
+	protected virtual void OnEntityChanged(Entity? oldEntity) { }
+
+	void IComponent.EntityChanged(Entity? oldEntity) => OnEntityChanged(oldEntity);
+
 	#endregion Entity
 
 	public Component()

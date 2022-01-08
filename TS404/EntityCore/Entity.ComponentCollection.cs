@@ -151,7 +151,11 @@ public partial class Entity : IEntity, IEquatable<Entity>
 				}
 			}
 
-			if (removed) m_Entity.OnComponentRemoved(component);
+			if (removed)
+			{
+				m_Entity.OnComponentRemoved(component);
+				((IComponent)component).EntityChanged(m_Entity);
+			}
 
 			return removed;
 		}
@@ -186,7 +190,11 @@ public partial class Entity : IEntity, IEquatable<Entity>
 				}
 			}
 
-			if (added) m_Entity.OnComponentAdded(component);
+			if (added)
+			{
+				m_Entity.OnComponentAdded(component);
+				((IComponent)component).EntityChanged(null);
+			}
 
 			return added;
 		}
